@@ -1,0 +1,615 @@
+function [H,U,V,h,h0] = evolveWave(kappa, b, geometry, domainOptions, options)
+
+[~, domainName] = standardNaming(geometry, kappa);
+
+load(domainName, 'w', 'J')
+
+x = real(w); x = x(1,:);
+y = imag(w); y = y(:,1)';
+lambda = b/kappa;
+
+
+x0 = (domainOptions.hallLength - 2*lambda);     % Center of the pulse
+a = 0.1; % Wave amplitude
+
+sigma = lmb2sig(lambda); 
+h0 = a*exp(-(real(w)-x0).^2/ (2 * sigma^2));
+
+h = h0;
+u = zeros(size(h));        % Initial velocity
+v = h;
+
+%[h,u, v] = enforceBCs(h, u, v);
+
+H = reshape(h, numel(J),1);
+U = reshape(u, numel(J),1);
+V = reshape(v, numel(J),1);
+
+%% Setting space and time step sizes
+dxi = abs(w(1,1) - w(1,2));
+dzeta = dxi;
+%dt = dxi/2;
+
+%% Defining space discretization
+
+
+%travel_distance = 10;% in lambda units
+
+%Lx = lambda*(travel_distance+3);% Length of the domain
+%Lx = 50;
+%Ly = 5;
+
+%dx = 0.2;
+%dzeta = 0.2;
+
+%x = 0:dx:Lx;
+%y = 0:dzeta:Ly;
+
+Nx = length(x);
+Ny = length(y);
+
+%% Load Jacobian data
+%J = 1; %constant J for now
+%J = ones(Ny,Nx);
+
+%% Defining time discretization
+T = 120;
+dt = 0.5*dxi;
+t = 0:dt:T;
+Nt = length(t);
+speed = 4;
+
+%% Check CFL (WIP)
+CFL = dt / sqrt(dxi^2 + dzeta^2);
+if CFL > 1
+    error('CFL condition not satisfied. Stopping execution.');
+end
+
+%% Initial data
+% Parameters
+alpha = 0.3;
+beta = sqrt(3 * alpha / (4 * (1 + 0.68 * alpha)));
+c = sqrt(6 * (1 + alpha)^2 / (alpha^2 * (3 + 2 * alpha)) * ((1 + alpha) * log(1 + alpha) - alpha));
+
+% Define eta_0 as a function of x, with default x_0 = 0 and t = 0 (local
+% var x here)
+eta_0 = @(x, x_0, t) alpha ./ cosh(beta * (x - x_0 - c * t)).^2 ./ (1 + alpha * tanh(beta * (x - x_0 - c * t)).^2);
+
+% Parameter d for potential phi
+d = c * alpha / (beta * (1 + alpha));
+
+% Define phi_0 as a function of x, with default x_0 = 0 and t = 0
+phi_0 = @(x, x_0, t) c * alpha / (beta * (1 + alpha)) * tanh(beta * (x - x_0 - c * t));
+
+x_0 = 3*lambda/2;     % Center of the pulse
+
+eta = zeros(Nt,Ny,Nx);
+phi = zeros(Nt,Ny,Nx);
+
+eta(1,:,:) = repmat(eta_0(x, x_0, 0),Ny,1);
+phi(1,:,:) = repmat(phi_0(x, x_0, 0),Ny,1);
+
+%% Fin dif funcs
+m = @(f,n) f(n,2:end-1, 2:end-1);
+
+Dx = @(f,n) (f(n,2:end-1, 3:end) - f(n,2:end-1, 1:end-2))/(2*dxi);
+ 
+Dy = @(f,n) (f(n,3:end, 2:end-1) - f(n,1:end-2,2:end-1))/(2*dzeta);
+
+DDx = @(f,n) (f(n,2:end-1, 3:end) - 2*f(n,2:end-1, 2:end-1) + f(n,2:end-1, 1:end-2))/(dxi^2);
+
+DDy = @(f,n) (f(n,3:end ,2:end-1) - 2*f(n,2:end-1,2:end-1) + f(n,1:end-2,2:end-1))/(dzeta^2);
+
+%{
+eta_x = Dx(eta,dxi); eta_y = Dy(eta, dzeta);
+phi_x = Dx(phi,dxi); phi_y = Dy(phi, dzeta);
+
+phi_x2 = DDx(phi,dxi); phi_y2 = DDy(phi, dzeta);
+%
+%% Aux functions
+%E = @(n) -((1+m(eta,n)).*(DDx(phi,n)+DDy(phi,n)) + Dx(eta,n).*Dx(phi,n) + Dy(eta,n).*Dy(phi,n))./J;
+%F = @(n) m(phi,n) -(DDx(phi,n)+DDy(phi,n))./(3*J);
+%G = @(n) - m(eta,n) - (Dx(phi,n).^2 + Dy(phi,n).^2)./(2*J);
+
+%E = -((1+m(eta)).*(phi_x2 + phi_y2) + eta_x.*phi_x + eta_y.*phi_y)./J;
+%F = m(phi) - (phi_x2 + phi_y2)./(3*J);
+%G = - m(eta) - (phi_x.^2 + phi_y.^2)./(2*J);
+%}
+%% Constructing the matrix A
+% Mapping from 2D index (i, j) to 1D index k
+index = @(i, j) (i - 1) * Nx + j;
+
+% Discretization coefficients
+r = (1/3)/(dxi^2);
+s = (1/3)/(dzeta^2);
+
+% Initialize sparse matrix A and right-hand side vector f
+N = Nx * Ny;
+
+%
+A = sparse(N, N);  % Sparse matrix initialization in MATLAB
+
+
+disp('constructing sparse matrix A...')
+
+for i = 2:Ny-1
+    for j = 2:Nx-1
+        k = index(i, j);  % 1D index for grid point (i, j)
+
+        % Elliptical equation in 2D: u - (u_xx + u_yy) = 3F
+        A(k, k) = 1 + 2*(r + s)/J(i,j);  % Center point: u_{i,j}
+
+        % x-direction neighbors: u_{i+1,j} and u_{i-1,j}
+        A(k, index(i+1, j)) = -r/J(i,j);   % u_{i+1, j}
+        A(k, index(i-1, j)) = -r/J(i,j);   % u_{i-1, j}
+
+        % y-direction neighbors: u_{i,j+1} and u_{i,j-1}
+        A(k, index(i, j+1)) = -s/J(i,j);   % u_{i, j+1}
+        A(k, index(i, j-1)) = -s/J(i,j);   % u_{i, j-1}
+    end
+end
+
+% Left boundary (x = 0)
+for j = 1:Ny
+    k = index(j, 1);
+    A(k, :) = 0;
+    A(k, index(j, 1)) = 1;
+    A(k, index(j, 2)) = -1;  % u_{0,j} = u_{1,j}
+end
+
+% Right boundary (x = Lx)
+for j = 1:Ny
+    k = index(j, Nx);
+    A(k, :) = 0;
+    A(k, index(j, Nx)) = 1;
+    A(k, index(j, Nx-1)) = -1;  % u_{Nx-1,j} = u_{Nx-2,j}
+end
+
+% Bottom boundary (y = 0)
+for i = 1:Nx
+    k = index(1, i);
+    A(k, :) = 0;
+    A(k, index(1, i)) = 1;
+    A(k, index(2, i)) = -1;  % u_{i,0} = u_{i,1}
+end
+
+% Top boundary (y = Ly)
+for i = 1:Nx
+    k = index(Ny, i);
+    A(k, :) = 0;
+    A(k, index(Ny, i)) = 1;
+    A(k, index(Ny-1, i)) = -1;  % u_{i,Ny-1} = u_{i,Ny-2}
+end
+
+clear i j
+%save('myA.mat','A')
+%}
+
+%% Loading A_python for comparison
+%load('myA.mat')
+%load('A_python')
+
+%A_dense = csvread('A_python.csv');  % For older MATLAB versions
+%A_dense = readmatrix('A_python.csv'); % For newer MATLAB versions (R2019b or later)
+
+%A_python = sparse(A_dense);
+
+disp('getting LU decomposition for A...')
+[L, U] = lu(A);
+
+EE = zeros(Nt, Ny, Nx);
+FF = zeros(Nt, Ny, Nx);
+GG = zeros(Nt, Ny, Nx);
+
+%% Main loop
+innerIterCap = 3;
+J = reshape(J, [1,size(J)]);
+jump_x = 1; %grid spacing for better visualization
+dist = 0;
+
+outerIter = 1;
+n = outerIter;
+outerIterCap = 1000;
+tailTol = 0.001;
+%while dist < travel_distance*lambda
+while outerIter < min(outerIterCap, Nt)
+    
+	%% Predictor initial guess
+    EE(n,2:end-1,2:end-1) = ...
+        -((1+m(eta,n)).*(DDx(phi,n)+DDy(phi,n)) +...
+        Dx(eta,n).*Dx(phi,n) + ...
+        Dy(eta,n).*Dy(phi,n))./J(1,2:end-1,2:end-1);
+    FF(n,2:end-1,2:end-1) = ...
+        m(phi,n) -(DDx(phi,n)+...
+        DDy(phi,n))./(3*J(1,2:end-1,2:end-1));
+    GG(n,2:end-1,2:end-1) = ...
+        -m(eta,n) - (Dx(phi,n).^2 + Dy(phi,n).^2)./(2*J(1,2:end-1,2:end-1));
+    eta(n+1,2:end-1,2:end-1) = m(eta,n) + dt*m(EE,n); 
+    FF(n+1,2:end-1,2:end-1) = m(FF,n) + dt*m(GG,n);
+    FF(n+1,:,:) = neumann_correction(squeeze(FF(n+1,:,:)));
+    eta(n+1,:,:) = neumann_correction(squeeze(eta(n+1,:,:)));
+    aux = solve(squeeze(FF(n+1,:,:)),L,U);
+    %aux2 = solve(squeeze(FF(n+1,:,:)),A_python);
+    phi(n+1,:,:) = aux; 
+    %{
+    %% Debug (prova real)
+    phir = squeeze(phi(1,:,:));
+    phir = set_f(phir);
+    %phir = reshape(phir,N,1);
+    sbF = A*phir;
+    sbF = reshape_new(sbF,Ny,Nx);
+    
+    figure(1)
+    plot(x(2:end), squeeze(FF(1,5,2:end))), hold on
+    plot(x(2:end), squeeze(sbF(5,2:end)))
+    %plot(x(2:end), squeeze(phi(1,5,2:end)))
+    
+    legend('This if F', 'This should be F', 'phi')
+    %{
+    p = 34;
+    
+    sbphi = solve(squeeze(FF(1,:,:)),L,U); %should be phi(1)
+    figure(2)
+    plot(x, squeeze(phi(1,5,:))), hold on
+    plot(x, squeeze(sbphi(5,:)))
+    
+    pp = 23;
+    %}
+    
+    %plot(x(2:end-1), squeeze(FF(1,5,2:end-1))), hold on
+    %plot(x(2:end-1), squeeze(FF(2,5,2:end-1)))
+    
+    %figure(2)
+    %plot(x(2:end-1), squeeze(phi(1,5,2:end-1))), hold on
+    %plot(x(2:end-1), squeeze(phi(2,5,2:end-1)))
+    %}
+      
+    %% Corrector
+    innerIter = 0; 
+    while innerIter < innerIterCap
+        %EE(n+1,2:end-1,2:end-1) = E(n+1); %EE(n+1,:,:) = neumann_correction(squeeze(EE(n+1,:,:)));
+        %FF(n+1,2:end-1,2:end-1) = F(n+1);
+        %GG(n+1,2:end-1,2:end-1) = G(n+1);
+        
+        EE(n+1,2:end-1,2:end-1) = ...
+            -((1+m(eta,n+1)).*(DDx(phi,n+1)+DDy(phi,n+1)) + Dx(eta,n+1).*Dx(phi,n+1) + Dy(eta,n+1).*Dy(phi,n+1))./J(1,2:end-1,2:end-1);
+        FF(n+1,2:end-1,2:end-1) = ...
+            m(phi,n+1) -(DDx(phi,n+1)+DDy(phi,n+1))./(3*J(1,2:end-1,2:end-1));
+        GG(n+1,2:end-1,2:end-1) = ...
+            - m(eta,n+1) - (Dx(phi,n+1).^2 + Dy(phi,n+1).^2)./(2*J(1,2:end-1,2:end-1));
+           
+        eta(n+1,2:end-1,2:end-1) = m(eta,n) + (dt/2)*(m(EE,n+1)+m(EE,n));
+        eta(n+1,:,:) = neumann_correction(squeeze(eta(n+1,:,:)));
+        
+        FF(n+1,2:end-1,2:end-1) = m(FF,n) + (dt/2)*(m(GG,n+1)+m(GG,n));
+        phi(n+1,:,:) = solve(squeeze(FF(n+1,:,:)),L,U);
+        
+        innerIter = innerIter + 1;
+    end
+    
+    %
+    if options.plotFlag && mod(n,speed)==0
+        
+        %{        
+        figure(1)
+        plot(x(1:jump_x:end), squeeze(eta(n,5,1:jump_x:end)),'k');
+        title('eta')
+        drawnow, pause(0.001)
+        %}
+        
+        figure(1)
+        %plot(x(1:jump_x:end), squeeze(eta(n,5,1:jump_x:end)),'k');
+        eeta = squeeze(eta(n,:,:));
+        surf(x,y,eeta)
+        title('eta')
+        drawnow, pause(0.001)
+        %}
+        
+        %{        
+        figure(2)
+        plot(x(1:jump_x:end), squeeze(phi(n,5,1:jump_x:end)), 'k');
+        title('phi')
+        
+        figure(3)
+        plot(x(1:jump_x:end), squeeze(EE(n,5,1:jump_x:end)), 'k');
+        title('E')
+        
+        figure(4)
+        plot(x(1:jump_x:end), squeeze(FF(n,5,1:jump_x:end)), 'k');
+        title('F')
+        
+        figure(5)
+        plot(x(1:jump_x:end), squeeze(GG(n,5,1:jump_x:end)), 'k');
+        title('G')
+        
+        
+        p = 32;
+        
+        figure(1)
+        plot(x(1:jump_x:end), squeeze(eta(n+1,5,1:jump_x:end)),'k');
+        title('eta')
+        
+        figure(2)
+        plot(x(1:jump_x:end), squeeze(phi(n+1,5,1:jump_x:end)), 'k');
+        title('phi')
+        
+        figure(3)
+        plot(x(1:jump_x:end), squeeze(EE(n+1,5,1:jump_x:end)), 'k');
+        title('E')
+        
+        figure(4)
+        plot(x(1:jump_x:end), squeeze(FF(n+1,5,1:jump_x:end)), 'k');
+        title('F')
+        
+        figure(5)
+        plot(x(1:jump_x:end), squeeze(GG(n+1,5,1:jump_x:end)), 'k');
+        title('G')
+         %}
+        %p = 33;
+      
+    end
+    %}
+    
+    %hh = squeeze(eta(n,5,:));   
+    %[~,loc] = findpeaks(hh,'MinPeakHeight', 0.7*alpha); % finds index for which final wave prof peaks (center of final gaussian)
+    %x0f = x(loc);
+    %dist = abs(x_0 - x0f)
+    
+    %n = n + 1;
+    outerIter = outerIter + 1;
+    
+    %disp([outerIter,Nt])
+    
+    n = outerIter;
+    tail = eta(n,6,end-10);
+    
+    disp(['iteration ', num2str(n), ' out of ', num2str(Nt), '...'])
+    disp(['tail at ', num2str(tail), '...'])
+  
+    if tail > tailTol
+        disp(['tail tolerance reached at ', num2str(tailTol), '...'])
+        disp('terminating...')
+        break
+    end
+end
+
+[waveName, ~] = standardNaming(geometry, kappa);
+
+H = eta;
+
+save(waveName, 'H', 'h', 'h0', 'x0')
+
+%% Finite dif and extra functions
+%{
+function result = Dx(f,dxi)
+    result = (f(3:end, 2:end-1) - f(1:end-2,2:end-1)) / (2 * dxi);
+end
+ 
+function result = Dy(f,dzeta)
+    result = (f(2:end-1, 3:end) - f(2:end-1, 1:end-2)) / (2 * dzeta);
+end
+
+function result = DDx(f,dxi)
+    result = (f(3:end ,2:end-1) - 2*f(2:end-1,2:end-1) + f(1:end-2,2:end-1))/(dxi^2);
+end
+
+function result = DDy(f,dzeta)
+    result = (f(2:end-1, 3:end) - 2*f(2:end-1, 2:end-1) + f(2:end-1, 1:end-2))/(dzeta^2);
+end
+
+function result = m(f)
+    result = f(2:end-1,2:end-1);
+end
+%}
+
+function f = set_f(FF)
+    % Initialize right-hand side vector f
+    aux = size(FF);
+    Ny = aux(1); Nx = aux(2);
+    N = prod(aux);
+    f = zeros(N, 1);  % Column vector in MATLAB
+    
+    % Mapping from 2D index (i, j) to 1D index k
+    index = @(i, j) (i - 1)*Nx + j;
+    
+    % Construct the source term in the interior of the domain
+    for i = 2:Ny-1
+        for j = 2:Nx-1
+            k = index(i, j);  % 1D index for grid point (i, j)
+
+            % Source term f(x, y) at the point (i, j)
+            f(k) = FF(i, j);
+        end
+    end
+
+    % Apply Dirichlet boundary conditions (u = 0) on the left and right boundaries
+    for j = 1:Ny
+        % Left boundary (x = 0)
+        f(index(j, 1)) = 0;
+
+        % Right boundary (x = Lx)
+        f(index(j, Nx)) = 0;
+    end
+
+    % Apply Neumann boundary conditions (no flux) on the bottom and top boundaries
+    for i = 1:Nx
+        % Bottom boundary (y = 0)
+        f(index(1, i)) = 0;  % No flux means no contribution to f
+
+        % Top boundary (y = Ly)
+        f(index(Ny, i)) = 0;  % No flux means no contribution to f
+    end
+end
+
+%--------
+
+function h = neumann_correction(h)
+    h(:, 1) = h(:, 2); % Left boundary
+    h(:, end) = h(:, end-1); % Right boundary
+    h(1, :) = h(2, :); % Bottom boundary
+    h(end, :) = h(end-1, :); % Top boundary
+end
+
+function result = solve(FF, L, U)
+    aux = size(FF);
+    Ny = aux(1); Nx = aux(2);
+    N = prod(aux);
+
+    f = set_f(FF);
+    
+    %f = reshape(FF, N, 1);
+    
+    u = U\(L\f);
+    
+    result = reshape_new(u, Ny, Nx);
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+%{
+%% Main loop
+%x0f = x0; 
+%dist = 0; %distance between current center of pulse and initial center of pulse
+iter = 0;
+
+endWaveHeigt = max(h(:,end)); %wave height at the end of channel
+tol = a*10^-7; 
+
+%numberOfIterations = 200;
+
+%while dist < travel_distance*lambda(index)
+while endWaveHeigt < tol
+%while iter < numberOfIterations
+% RK4 time-stepping
+    k1_u = -dt * (circshift(h, [ -1 0]) - circshift(h, [ 1 0])) / (2 * dxi);
+    k1_v = -dt * (circshift(h, [ 0 -1]) - circshift(h, [0 1])) / (2 * dzeta);
+    k1_h = -dt * ((circshift(u, [ -1 0]) - circshift(u, [ 1 0])) / (2 * dxi) +...
+        (circshift(v, [ 0 -1]) - circshift(v, [ 0 1])) / (2 * dzeta))./J;
+    
+    h1 = h + 0.5 * k1_h;
+    u1 = u + 0.5 * k1_u;
+    v1 = v + 0.5 * k1_v;
+    
+    [h1, u1, v1] = enforceBCs(h1, u1, v1);  % Enforce BCs on the walls
+    
+    k2_u = -dt * (circshift(h1, [ -1 0]) - circshift(h1, [ 1 0])) / (2 * dxi);
+    k2_v = -dt * (circshift(h1, [ 0 -1]) - circshift(h1, [ 0 1])) / (2 * dzeta);
+    k2_h = -dt * ((circshift(u1, [ -1 0]) - circshift(u1, [ 1 0])) / (2 * dxi) + ...
+        (circshift(v1, [ 0 -1]) - circshift(v1, [ 0 1])) / (2 * dzeta))./J;
+    
+    h2 = h + 0.5 * k2_h;
+    u2 = u + 0.5 * k2_u;
+    v2 = v + 0.5 * k2_v;
+    
+    [h2, u2, v2] = enforceBCs(h2, u2, v2); 
+    
+    k3_u = -dt * (circshift(h2, [ -1 0]) - circshift(h2, [ 1 0])) / (2 * dxi);
+    k3_v = -dt * (circshift(h2, [ 0 -1]) - circshift(h2, [ 0 1])) / (2 * dzeta);
+    k3_h = -dt * ((circshift(u2, [ -1 0]) - circshift(u2, [ 1 0])) / (2 * dxi) + ...
+        (circshift(v2, [ 0 -1]) - circshift(v2, [ 0 1])) / (2 * dzeta))./J;
+    
+    
+    h3 = h + k3_h;
+    u3 = u + k3_u;
+    v3 = v + k3_v;
+    
+    [h3, u3, v3] = enforceBCs(h3, u3, v3);
+    
+    k4_u = -dt * (circshift(h3, [ -1 0]) - circshift(h3, [ 1 0])) / (2 * dxi);
+    k4_v = -dt * (circshift(h3, [0 -1]) - circshift(h3, [ 0 1])) / (2 * dzeta);
+    k4_h = -dt * ((circshift(u3, [ -1 0]) - circshift(u3, [ 1 0])) / (2 * dxi) + ...
+        (circshift(v3, [ 0 -1]) - circshift(v3, [ 0 1])) / (2 * dzeta))./J;
+    
+    u = u + (1/6) * (k1_u + 2 * k2_u + 2 * k3_u + k4_u);
+    v = v + (1/6) * (k1_v + 2 * k2_v + 2 * k3_v + k4_v);
+    h = h + (1/6) * (k1_h + 2 * k2_h + 2 * k3_h + k4_h);
+    
+    %v = impermiability_v(v);
+    %h = neumann_correction(h);
+    %u = impermiability_u(u);
+    
+    [h, u, v] = enforceBCs(h, u, v);  % Enforce slit barrier
+
+    %% Saves selected number of frames
+    if mod(iter,options.frameRate)==0
+        
+        H = [H, reshape(h,numel(J),1)];
+        U = [U, reshape(u,numel(J),1)];
+        V = [V, reshape(v,numel(J),1)];
+                
+    end
+    
+    %{
+    if anim == 1 && mod(iter, 1/dxi) == 0 %PHYSICAL
+        jump_xi = 5; jump_zeta = 1;
+
+        XX = X(1:jump_zeta:end,1:jump_xi:end);
+        YY = Y(1:jump_zeta:end,1:jump_xi:end);
+        hh = h(1:jump_zeta:end,1:jump_xi:end);
+        
+        mesh(XX, YY, hh,'edgecolor', 'k'); 
+        zlim([a*(-0.2),a*1.5])
+        xlabel('X');
+        ylabel('Y');
+        zlabel('h');
+        title(['iterations = ',num2str(iter), ' kappa= ', num2str(kappa(index))]);
+        drawnow, pause(0.1)
+    elseif anim == 2 && mod(iter, 100) == 0 %CANONICAL
+        mesh(Xi, Zeta, h,'edgecolor', 'k'); 
+        zlim([a*(-0.2),a*1.5])
+        xlabel('Xi');
+        ylabel('Zeta');
+        zlabel('h');
+        title(['Number of iterations = ',num2str(iter)]);
+        drawnow
+    elseif anim ==3 && mod(iter, 10/dxi) == 0 %BOTH
+       %...
+    end
+    %}
+
+    endWaveHeigt = max(h(:,end)); % update wave height at the end of channel
+    iter = iter + 1
+    
+    if iter > options.finalTimeCap
+        disp('Exceed final predetermined time cap')
+        break
+    end
+
+    %{    
+    hh = h(floor(end/2),:);   
+    [~,loc] = findpeaks(hh,'MinPeakHeight', 0.7*a); % finds index for which final wave prof peaks (center of final gaussian)
+    x0f = xi(loc);
+    dist = abs(x0 - x0f); %gets distance between current and initial peak positions
+    %}
+    
+end
+%}
+
+
+%{
+function [h,u, v] = enforceBCs(h, u, v)tol
+%
+v(:, 1) = 0; % Left boundary
+v(:, end) = 0; % Right boundary
+
+u(1, :) = 0; % Bottom boundary
+u(end, :) = 0; % Top boundary
+
+h(:, 1) = h(:, 2); % Left boundary
+h(:, end) = h(:, end-1); % Right boundary   
+
+h(1, :) = h(2, :); % Bottom boundary
+h(end, :) = h(end-1, :); % Top boundary
+%}
+    
+end
