@@ -2,7 +2,7 @@ function [] = processWaveData(kappa, b, geometry, options)
 
 [waveName, domainName] = standardNaming(geometry, kappa);
 
-load(waveName,'H', 'h', 'h0', 'x0')
+load(waveName,'H', 'x0')
 load(domainName, 'w','z','J')
 
 %surf(real(w),imag(w),J)
@@ -41,8 +41,8 @@ if options.playMoviePhys
     tmp = size(H);
     for i = 1:tmp(1)
         
-        h = squeeze(H(i,:,:));        
-        %h = reshape(H(:,i),size(z));
+        %h = squeeze(H(i,:,:));
+        h = reshape(H(:,i),size(z));
 
         mesh(X,Y,h)
 

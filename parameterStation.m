@@ -1,11 +1,11 @@
 % Secondary parameters
 
-addpath('/home/eduardocastro/Desktop/repo lab nazareth/sc-toolbox-3.1.3')
+addpath('/Users/eduardocastro/Desktop/repos/clean-waves-on-fat-graphs/External')
 
 %% Set domain options
 
 domainOptions = struct();
-domainOptions.Nzeta = 35;
+domainOptions.Nzeta = 12;
 domainOptions.hallLength = 2*lambda;
 domainOptions.corridorLength = 5*lambda;
 domainOptions.outdoorsLength = 2*lambda;
@@ -69,9 +69,10 @@ end
 
 %% Set solver options
 waveOptions = struct();
-waveOptions.frameRate = 150;
-waveOptions.finalTimeCap = 30000;
+%waveOptions.frameRate = 150;
+waveOptions.finalTime = 40;
 waveOptions.plotFlag = false;
+waveOptions.frames = 15;
 
 %% Set wave view options
 waveViewOptions = struct();

@@ -417,7 +417,7 @@ end
 
 H = Eta;
 
-save(waveName, 'H', 'x0')
+save(waveName, 'H', 'h', 'h0', 'x0')
 
 %% Finite dif and extra functions
 %{

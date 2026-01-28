@@ -24,7 +24,7 @@ parameterStation
 
 %---
 
-%setDomain(b, geometry,domainOptions);
+setDomain(b, geometry,domainOptions);
 
 %---
 load(['DomainData/geometry= ', geometry, '.mat'], 'w', 'J','P');
